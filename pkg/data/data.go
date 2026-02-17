@@ -49,6 +49,8 @@ type Structure struct {
 	clock utils.IClock
 	// Includes stats in results. Useful for debugging but may slightly affect performance.
 	includeStats bool
+	// Callback to report deltas
+	reportDelta ReportDeltaFunc
 }
 
 // NewStructureWithClock creates a Structure using the provided clock. This is
@@ -71,7 +73,7 @@ func NewStructureWithClock(config *config.FairnessTrackerConfig, id uint64, incl
 		levels:       levels,
 		config:       config,
 		id:           id,
-		murmurSeed:   rand.Uint32(),
+		murmurSeed:   uint32(id),
 		clock:        clock,
 		includeStats: includeStats,
 	}, nil
@@ -91,6 +93,35 @@ func (s *Structure) GetID() uint64 {
 func (s *Structure) Close() {
 }
 
+// ReportDeltaFunc is a callback to report bucket updates to the state service.
+// row is the level index, col is the bucket index.
+type ReportDeltaFunc func(row, col uint64, deltaProb float64, timestamp uint64)
+
+// SetReportDeltaFunc sets the callback for reporting deltas.
+func (s *Structure) SetReportDeltaFunc(fn ReportDeltaFunc) {
+	s.reportDelta = fn
+}
+
+// UpdateBucket updates a specific bucket with the given probability and timestamp.
+// It uses Max-Timestamp-Wins logic.
+func (s *Structure) UpdateBucket(row, col uint64, prob float64, timestamp uint64) {
+	if row >= uint64(s.config.L) || col >= uint64(s.config.M) {
+		return // Out of bounds
+	}
+
+	lvl := s.levels[row]
+	buck := lvl[col]
+
+	buck.mu.Lock()
+	defer buck.mu.Unlock()
+
+	// Max-Timestamp-Wins
+	if timestamp > buck.lastUpdatedTimeMillis {
+		buck.probability = prob
+		buck.lastUpdatedTimeMillis = timestamp
+	}
+}
+
 // RegisterRequest records an incoming request from the client and returns the
 // throttling decision based on current probabilities.
 func (s *Structure) RegisterRequest(_ context.Context, clientIdentifier []byte) *request.RegisterRequestResult {
@@ -99,7 +130,7 @@ func (s *Structure) RegisterRequest(_ context.Context, clientIdentifier []byte) 
 	bucketProbabilities := make([]float64, s.config.L)
 
 	// We can ignore the error since the handler never returns one
-	s.visitBuckets(clientIdentifier, func(l uint32, m uint32, b *bucket) {
+	s.visitBuckets(clientIdentifier, func(l uint32, m uint32, b *bucket, originalProb float64) {
 		bucketProbabilities[l] = b.probability
 		if s.includeStats {
 			if stats == nil {
@@ -108,6 +139,14 @@ func (s *Structure) RegisterRequest(_ context.Context, clientIdentifier []byte) 
 				}
 			}
 			stats.BucketIndexes[l] = int(m)
+		}
+
+		// Report decay if any
+		if s.reportDelta != nil {
+			delta := b.probability - originalProb
+			if delta != 0 {
+				s.reportDelta(uint64(l), uint64(m), delta, b.lastUpdatedTimeMillis)
+			}
 		}
 	})
 
@@ -138,7 +177,7 @@ func (s *Structure) ReportOutcome(_ context.Context, clientIdentifier []byte, ou
 		adjustment = -s.config.Pd
 	}
 
-	s.visitBuckets(clientIdentifier, func(_ uint32, _ uint32, b *bucket) {
+	s.visitBuckets(clientIdentifier, func(l uint32, m uint32, b *bucket, originalProb float64) {
 		p := b.probability + adjustment
 		if p < 0 {
 			p = 0
@@ -150,6 +189,13 @@ func (s *Structure) ReportOutcome(_ context.Context, clientIdentifier []byte, ou
 
 		b.probability = p
 		b.lastUpdatedTimeMillis = s.currentMillis()
+
+		if s.reportDelta != nil {
+			delta := b.probability - originalProb
+			if delta != 0 {
+				s.reportDelta(uint64(l), uint64(m), delta, b.lastUpdatedTimeMillis)
+			}
+		}
 	})
 
 	return &request.ReportOutcomeResult{}
@@ -157,7 +203,7 @@ func (s *Structure) ReportOutcome(_ context.Context, clientIdentifier []byte, ou
 
 // Visit the buckets belonging to the given clientIdentifier
 // Also takes the bucket lock and manages probability decay prior to calling the handler
-func (s *Structure) visitBuckets(clientIdentifier []byte, fn func(uint32, uint32, *bucket)) {
+func (s *Structure) visitBuckets(clientIdentifier []byte, fn func(uint32, uint32, *bucket, float64)) {
 	levelHashes := generateNHashesUsing64Bit(clientIdentifier, s.config.L, s.murmurSeed)
 
 	for l := 0; l < int(s.config.L); l++ {
@@ -167,6 +213,7 @@ func (s *Structure) visitBuckets(clientIdentifier []byte, fn func(uint32, uint32
 
 		buck.mu.Lock()
 
+		originalProb := buck.probability
 		cur := s.currentMillis()
 		deltaT := cur - buck.lastUpdatedTimeMillis
 		pm := adjustProbability(buck.probability, s.config.Lambda, deltaT)
@@ -174,7 +221,7 @@ func (s *Structure) visitBuckets(clientIdentifier []byte, fn func(uint32, uint32
 		buck.lastUpdatedTimeMillis = cur
 		buck.probability = pm
 
-		fn(uint32(l), m, buck)
+		fn(uint32(l), m, buck, originalProb)
 		buck.mu.Unlock()
 	}
 }
