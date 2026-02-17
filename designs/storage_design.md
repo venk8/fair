@@ -291,9 +291,6 @@ This is not covered in the doc and will be taken up in a future enhancement.
 4. **Implement gRPC Server**: Wire up `Sync` RPC with store and hub.
 5. **Integration**: Update FAIR instances to use State Service client.
 
-### Callout
-One minor change that needs to be addressed is the code to identify decays, it possible the l
-
 ## Testing
 - **Unit Tests**: Store aggregation logic, broadcast fan-out.
 - **Integration Tests**: Multiple clients pushing deltas, verifying all receive correct aggregated state.
