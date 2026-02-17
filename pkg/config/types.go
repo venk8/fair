@@ -22,4 +22,19 @@ type FairnessTrackerConfig struct {
 	IncludeStats bool
 	// The function to choose the final probability from all the bucket probabilities
 	FinalProbabilityFunction FinalProbabilityFunction
+
+	// The address of the State Service (e.g., "localhost:50051"). If empty, local state is used.
+	StateServiceAddress string
+}
+
+// StateServiceConfig defines the configuration for the State Service.
+type StateServiceConfig struct {
+	// The address to listen on for gRPC requests (e.g., ":50051")
+	GRPCListenAddress string
+	// The address to listen on for metrics (e.g., ":9090")
+	MetricsListenAddress string
+	// The duration of a seed window (e.g., 5m)
+	SeedWindowDuration time.Duration
+	// The TTL for seed eviction (e.g., 15m)
+	SeedEvictionTTL time.Duration
 }

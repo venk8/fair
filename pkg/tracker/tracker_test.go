@@ -158,7 +158,7 @@ func TestNewFairnessTrackerWithClockAndTicker_FirstStructureError(t *testing.T) 
 		return nil, fmt.Errorf("first structure failed")
 	}
 
-	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), nil, nil)
+	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), utils.NewRealClock(), nil)
 	require.Nil(t, ft)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Failed to create a structure")
@@ -179,7 +179,7 @@ func TestNewFairnessTrackerWithClockAndTicker_SecondStructureError(t *testing.T)
 		return nil, fmt.Errorf("second structure failed")
 	}
 
-	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), nil, nil)
+	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), utils.NewRealClock(), nil)
 	require.Nil(t, ft)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Failed to create a structure")
@@ -206,7 +206,7 @@ func TestNewFairnessTrackerWithClockAndTicker_RotationStructureError(t *testing.
 	}
 
 	ticker := newFakeTicker()
-	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), nil, ticker)
+	ft, err := NewFairnessTrackerWithClockAndTicker(config.DefaultFairnessTrackerConfig(), utils.NewRealClock(), ticker)
 	require.NoError(t, err)
 	require.NotNil(t, ft)
 

@@ -8,6 +8,8 @@ import (
 	"github.com/satmihir/fair/pkg/data"
 	"github.com/satmihir/fair/pkg/logger"
 	"github.com/satmihir/fair/pkg/request"
+	statepb "github.com/satmihir/fair/pkg/state/api/v1"
+	"github.com/satmihir/fair/pkg/state/client"
 	"github.com/satmihir/fair/pkg/utils"
 )
 
@@ -17,13 +19,14 @@ import (
 type FairnessTracker struct {
 	trackerConfig *config.FairnessTrackerConfig
 
-	// A counter to uniquely identify a structure
-	structureIDCounter uint64
-
 	mainStructure      request.Tracker
 	secondaryStructure request.Tracker
 
 	ticker utils.ITicker
+
+	stateClient *client.Client
+	ctx         context.Context
+	cancel      context.CancelFunc
 
 	// Rotation lock to ensure that we don't rotate while updating the structures
 	// The act of updating is a "read" in this case since multiple updates can happen
@@ -46,52 +49,83 @@ var newTrackerStructureWithClock = func(
 // where time needs to be controlled.
 func NewFairnessTrackerWithClockAndTicker(trackerConfig *config.FairnessTrackerConfig, clock utils.IClock, ticker utils.ITicker) (*FairnessTracker, error) {
 	// Guard clause: fail fast and return a clear error when caller passes a nil config.
-	// Without this, the function dereferences fields on trackerConfig (e.g. trackerConfig.IncludeStats)
-	// below and will panic with "runtime error: invalid memory address or nil pointer dereference".
 	if trackerConfig == nil {
 		return nil, NewFairnessTrackerError(nil, "trackerConfig must not be nil")
 	}
-	st1, err := newTrackerStructureWithClock(trackerConfig, 1, trackerConfig.IncludeStats, clock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ft := &FairnessTracker{
+		trackerConfig: trackerConfig,
+		ticker:        ticker,
+		stopRotation:  make(chan struct{}),
+		rotationLock:  sync.RWMutex{},
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+
+	if trackerConfig.StateServiceAddress != "" {
+		ft.stateClient = client.NewClient(trackerConfig.StateServiceAddress, ft.onStateUpdate)
+		ft.stateClient.Start(ctx)
+	}
+
+	// Calculate initial seeds based on time
+	now := clock.Now().UnixMilli()
+	windowMs := trackerConfig.RotationFrequency.Milliseconds()
+	currentSeed := uint64(now) / uint64(windowMs)
+	nextSeed := currentSeed + 1
+
+	st1, err := createStructure(trackerConfig, currentSeed, clock, ft.stateClient)
 	if err != nil {
+		cancel()
 		logger.Printf("error in creating first tracker : %v", err)
 		return nil, NewFairnessTrackerError(err, "Failed to create a structure")
 	}
 
-	st2, err := newTrackerStructureWithClock(trackerConfig, 2, trackerConfig.IncludeStats, clock)
+	st2, err := createStructure(trackerConfig, nextSeed, clock, ft.stateClient)
 	if err != nil {
+		cancel()
 		logger.Printf("error in creating second tracker : %v", err)
 		return nil, NewFairnessTrackerError(err, "Failed to create a structure")
 	}
 
-	stopRotation := make(chan struct{})
-	ft := &FairnessTracker{
-		trackerConfig:      trackerConfig,
-		structureIDCounter: 3,
+	ft.mainStructure = st1
+	ft.secondaryStructure = st2
 
-		mainStructure:      st1,
-		secondaryStructure: st2,
-
-		ticker: ticker,
-
-		rotationLock: sync.RWMutex{},
-		stopRotation: stopRotation,
+	if ft.stateClient != nil {
+		ft.stateClient.RequestFullState(currentSeed)
+		ft.stateClient.RequestFullState(nextSeed)
 	}
 
-	// Start a periodic task to rotate underlying structures to keep
-	// changing the hash seeds so we don't continue punishing the same
-	// innocent workloads repeatedly in the worst case of a false positive.
+	// Start a periodic task to rotate underlying structures
 	go func() {
 		for {
 			select {
-			case <-stopRotation:
+			case <-ft.stopRotation:
 				return
 			case <-ticker.C():
-				s, err := newTrackerStructureWithClock(trackerConfig, ft.structureIDCounter, trackerConfig.IncludeStats, clock)
+				// Calculate seed for the NEXT window
+				now := clock.Now().UnixMilli()
+				// S2 seed is (now / window) + 1 assuming we just entered window 'now/window'
+				// But ticker fires at end of window? Or start?
+				// If Ticker period is Window.
+				// T0: start.
+				// T1: fire. We are now in window 1.
+				// We want S2 (window 2) to be the new secondary.
+				// So seed = 2. (now/window + 1) -> (1 + 1) = 2.
+				seed := (uint64(now) / uint64(windowMs)) + 1
+
+				s, err := createStructure(trackerConfig, seed, clock, ft.stateClient)
 				if err != nil {
 					logger.Fatalf("failed to create a structure during rotation: %v", err)
-					return
+					// In production, we might want to retry or degrade gracefully.
+					// For now, logging fatal is consistent with previous behavior (implied, though previous just returned).
+					continue
 				}
-				ft.structureIDCounter++
+
+				if ft.stateClient != nil {
+					ft.stateClient.RequestFullState(seed)
+				}
 
 				ft.rotationLock.Lock()
 				ft.mainStructure = ft.secondaryStructure
@@ -148,4 +182,53 @@ func (ft *FairnessTracker) ReportOutcome(ctx context.Context, clientIdentifier [
 func (ft *FairnessTracker) Close() {
 	close(ft.stopRotation)
 	ft.ticker.Stop()
+	if ft.cancel != nil {
+		ft.cancel()
+	}
+	if ft.stateClient != nil {
+		ft.stateClient.Stop()
+	}
+}
+
+func createStructure(cfg *config.FairnessTrackerConfig, seed uint64, clock utils.IClock, client *client.Client) (request.Tracker, error) {
+	st, err := newTrackerStructureWithClock(cfg, seed, cfg.IncludeStats, clock)
+	if err != nil {
+		return nil, err
+	}
+
+	if client != nil {
+		if s, ok := st.(*data.Structure); ok {
+			s.SetReportDeltaFunc(func(row, col uint64, delta float64, ts uint64) {
+				client.SendDeltaUpdate(seed, []*statepb.BucketDelta{{
+					RowId:            row,
+					ColId:            col,
+					DeltaProb:        delta,
+					LastUpdateTimeMs: ts,
+				}})
+			})
+		}
+	}
+	return st, nil
+}
+
+func (ft *FairnessTracker) onStateUpdate(resp *statepb.SyncResponse) {
+	ft.rotationLock.RLock()
+	defer ft.rotationLock.RUnlock()
+
+	seed := resp.Seed
+
+	// Check if this seed matches main or secondary
+	if ft.mainStructure != nil && ft.mainStructure.GetID() == seed {
+		applyUpdate(ft.mainStructure, resp.Buckets)
+	} else if ft.secondaryStructure != nil && ft.secondaryStructure.GetID() == seed {
+		applyUpdate(ft.secondaryStructure, resp.Buckets)
+	}
+}
+
+func applyUpdate(tracker request.Tracker, buckets []*statepb.Bucket) {
+	if s, ok := tracker.(*data.Structure); ok {
+		for _, b := range buckets {
+			s.UpdateBucket(b.RowId, b.ColId, b.Prob, b.LastUpdateTimeMs)
+		}
+	}
 }

@@ -20,6 +20,10 @@ The codebase is organized as follows:
     - **`request/`**: Request and response models.
     - **`logger/`**: Logging interface and default implementations.
     - **`integration/`**: Integration tests.
+    - **`state/`**: Distributed State Service implementation (gRPC server, client, store).
+    - **`broadcast/`**: Real-time broadcast hub for State Service.
+- **`cmd/`**: Application entry points.
+    - **`state-service/`**: Main application for the Distributed State Service.
 - **`designs/`**: Design documents and templates.
 - **`mutations/`**: Mutation testing resources, including diffs and drivers.
 - **`tasks.go`**: A Go script for running maintenance tasks (like linting).
@@ -73,7 +77,7 @@ For more details on contributing, refer to [CONTRIBUTING.md](./CONTRIBUTING.md).
     - Run `make test` to verify no regressions.
 
 2.  **Updating Protobufs**:
-    - Edit `pkg/serialization/v1.proto`.
+    - Edit `pkg/serialization/v1.proto` or `pkg/state/api/v1/state_v1.proto`.
     - Run `make proto` to regenerate code.
     - Commit the generated files.
 

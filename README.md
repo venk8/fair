@@ -124,6 +124,27 @@ id := []byte("client_id")
 trk.ReportOutcome(ctx, id, request.OutcomeSuccess)
 ```
 
+## Distributed State Service
+
+FAIR supports distributed deployment where multiple instances share state via a central State Service. This ensures global fairness across a cluster.
+
+### Setup
+
+1. Start the State Service:
+   ```bash
+   go run cmd/state-service/main.go --grpc-addr=:50051
+   ```
+
+2. Configure FAIR instances to connect to it:
+   ```go
+   conf := config.DefaultFairnessTrackerConfig()
+   conf.StateServiceAddress = "localhost:50051"
+
+   tracker, _ := tracker.NewFairnessTracker(conf)
+   ```
+
+The State Service aggregates probability updates from all connected FAIR instances and broadcasts them back, ensuring eventual consistency.
+
 ## Tuning
 
 You can use the `GenerateTunedStructureConfig` to tune the tracker without directly touching the algorithm parameters. It exposes a simple interface where you have to pass the following things based on your application logic and scaling requirements.

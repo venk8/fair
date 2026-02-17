@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package fair.state.v1;
+
+option go_package = "github.com/satmihir/fair/pkg/state/api/v1";
+
+service StateService {
+  // Bidirectional stream for delta submission and state reception.
+  // Client sends deltas; server broadcasts aggregated bucket updates.
+  rpc Sync(stream SyncRequest) returns (stream SyncResponse);
+}
+
+message SyncRequest {
+  oneof request {
+    DeltaUpdate delta_update = 1;
+    StateRequest state_request = 2;  // Request full state for a seed
+  }
+}
+
+message StateRequest {
+  uint64 seed = 1;
+}
+
+message DeltaUpdate {
+  uint64 seed = 1;
+  repeated BucketDelta deltas = 2;
+}
+
+message BucketDelta {
+  uint64 row_id = 1;
+  uint64 col_id = 2;
+  double delta_prob = 3;         // Increment/decrement value
+  uint64 last_update_time_ms = 4;
+}
+
+message SyncResponse {
+  uint64 seed = 1;
+  repeated Bucket buckets = 2;   // Changed buckets only (sparse)
+}
+
+message Bucket {
+  uint64 row_id = 1;
+  uint64 col_id = 2;
+  double prob = 3;               // Aggregated absolute value
+  uint64 last_update_time_ms = 4;
+}
